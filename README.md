@@ -3,146 +3,294 @@
 
 ---
 
-## Q1. Kerberos Normal Authentication Flow [1 mark]
+## Q1. Kerberos Normal Authentication Flow
 
-The Kerberos authentication process follows five distinct steps, each involving specific principals and data exchanges:
+Kerberos works in five quick steps:
+- Client → AS (AS-REQ): proves identity using a key derived from the user's password.
+- AS → Client (AS-REP): returns a TGT and a session key (client can't decrypt the TGT).
+- Client → TGS (TGS-REQ): sends the TGT and the target SPN to request a service ticket.
+- TGS → Client (TGS-REP): issues a service ticket encrypted with the service account's key.
+- Client → Service (AP-REQ): presents the service ticket; the service verifies it locally.
 
-**Step 1 — AS-REQ (Client → KDC/AS):**
-The client initiates authentication by sending an **Authentication Service Request (AS-REQ)** to the Key Distribution Center (KDC), specifically its Authentication Service (AS) component. The client sends its username and a timestamp encrypted with a key derived from the user's password hash. Nothing sensitive (like the actual password) is transmitted in cleartext.
-
-**Step 2 — AS-REP (KDC/AS → Client):**
-The KDC validates the request and, if the user is found in Active Directory, responds with an **AS-REP** containing two items: (a) a **Ticket Granting Ticket (TGT)** encrypted with the KRBTGT account's secret hash (so only the KDC can read it), and (b) a session key encrypted with the user's own key. The TGT contains the user's identity and a copy of the session key, and it is valid for a limited time (typically 10 hours). The client cannot decrypt the TGT itself — it is an opaque token used purely for future requests.
-
-**Step 3 — TGS-REQ (Client → KDC/TGS):**
-When the client wants to access a specific service, it sends a **Ticket Granting Service Request (TGS-REQ)** to the TGS component of the KDC. This request includes the TGT obtained in Step 2 and the **Service Principal Name (SPN)** of the target service (e.g., `MSSQLSvc/dbserver.corp.local:1433`). The SPN uniquely identifies the service the client wants to reach.
-
-**Step 4 — TGS-REP (KDC/TGS → Client):**
-The KDC decrypts the TGT to verify the client's identity and session key, then issues a **TGS ticket (service ticket)** encrypted with the secret key of the target service account — the account associated with the requested SPN. The client receives this TGS ticket but cannot decrypt it, since it is encrypted with the service account's hash, not the user's.
-
-**Step 5 — AP-REQ (Client → Target Service):**
-The client presents the TGS ticket directly to the target service in an **Application Request (AP-REQ)**. The service decrypts the ticket using its own secret key, verifies the client's identity embedded inside, and grants or denies access. Crucially, the KDC is not contacted at this step — the service handles authentication locally using the ticket.
-
-**Summary of roles:**
-- **KDC** — issues both TGTs (via AS) and TGS tickets (via TGS); it is the central trust authority.
-- **TGT** — a proof-of-identity token; allows the client to request service tickets without re-entering credentials.
-- **TGS ticket** — a service-specific access token encrypted with the service account's hash.
-- **SPN** — the identifier that maps a service to its associated account in Active Directory.
+Roles: KDC issues tickets; TGT proves identity; service tickets grant access to specific services; SPN identifies the service.
 
 ---
 
-## Q2. Kerberos vs. Kerberoasting Comparison [1 mark]
+## Q2. Kerberos vs. Kerberoasting Comparison 
 
-| Aspect | Kerberos (Protocol) | Kerberoasting (Attack) |
+- Kerberos: a legitimate auth protocol that issues TGTs and service tickets.
+- Kerberoasting: an attack where an attacker requests a service ticket for an SPN and cracks it offline to recover the service account password.
+
+Why it works: any domain user can request a TGS for an SPN, and the returned ticket is encrypted with the service account's hash, so it can be cracked offline.
+
+---
+
+## Q3. Key Active Directory Terms Defined 
+
+- LDAP: directory protocol (ports 389/636). Used to query AD; useful for enumeration.
+- SPN: maps a network service to an AD account; central to kerberoasting.
+- Domain Controller (DC): hosts AD and handles authentication; a high-value target.
+- BloodHound / SharpHound: SharpHound collects AD data; BloodHound visualises attack paths.
+
+---
+
+## Q4. Golden Ticket vs. Silver Ticket Comparison
+
+- Golden Ticket: forged using the KRBTGT hash; gives domain-wide access.
+- Silver Ticket: forged with a service account hash; works only for a specific service on a host.
+
+Silver Tickets are quieter because they are validated only by the target service and rarely generate DC logs.
+
+---
+
+## Q5. ACL/ACE Misconfigurations in Active Directory
+
+An ACL/ACE misconfiguration happens when an object has overly permissive entries, creating unintended privilege paths.
+
+- GenericAll: full control over an object. Example: add a user to a privileged group to gain admin rights.
+- WriteDACL: lets an attacker change ACLs. Example: grant DCSync rights to a service account and dump hashes.
+
+---
+
+## Q6. Persistence Techniques After Domain Admin Access 
+
+- Golden Ticket: forge TGTs using KRBTGT hash; persists until KRBTGT is rotated twice.
+- AdminSDHolder backdoor: add a malicious ACE to AdminSDHolder so SDProp propagates it to protected accounts; remove the ACE from AdminSDHolder to remediate.
+
+---
+
+# HTB Academy — AD Administration: Guided Lab Part I
+
+
+## Overview
+
+This lab simulates a day as a domain admin at Inlanefreight. The task came in via an email from Bucky Barnes asking the helpdesk to handle some routine AD work — new hires, account cleanup, a locked-out user, a new security group, and a GPO update. I connected via RDP using the provided credentials and used a mix of ADUC (the GUI snap-in) and PowerShell to get everything done.
+
+**Connection:**
+```bash
+xfreerdp /v:<TARGET_IP> /u:htb-student_adm /p:Academy_student_DA!
+```
+
+---
+
+## Task 1 — Manage Users
+
+### Adding New Hires
+
+Three users needed to be created under `INLANEFREIGHT.LOCAL > Corp > Employees > HQ-NYC > IT`. Each needed a full name, display name, email, and the "must change password at logon" flag set.
+
+```powershell
+Import-Module -Name ActiveDirectory
+
+New-ADUser -Name "Andromeda Cepheus" -Enabled $true `
+  -OtherAttributes @{'title'="Analyst"; 'mail'="a.cepheus@inlanefreight.local"}
+
+New-ADUser -Name "Orion Starchaser" -Enabled $true `
+  -OtherAttributes @{'title'="Analyst"; 'mail'="o.starchaser@inlanefreight.local"}
+
+New-ADUser -Name "Artemis Callisto" -Enabled $true `
+  -OtherAttributes @{'title'="Analyst"; 'mail'="a.callisto@inlanefreight.local"}
+```
+
+For the GUI: right-clicked the IT OU in ADUC, selected **New > User**, filled in first/last name, set logon name as `acepheus`, assigned a temp password (`NewP@ssw0rd123!`), and checked **User must change password at next logon**.
+
+### Removing Old Accounts
+
+Two accounts flagged in an audit needed to go — Mike O'Hare and Paul Valencia:
+
+```powershell
+Remove-ADUser -Identity mohare
+Remove-ADUser -Identity pvalencia
+```
+
+For the GUI: right-clicked the **Employees OU**, hit **Find**, searched by name, then right-clicked the result and selected **Delete**. Confirmed in the popup. Ran the search again to verify they were gone.
+
+### Unlocking Adam Masters
+
+Adam locked himself out after too many wrong password attempts. The helpdesk verified his identity so the ticket was valid. Three things needed to happen: unlock the account, reset the password, force a change at next login.
+
+```powershell
+Unlock-ADAccount -Identity amasters
+
+Set-ADAccountPassword -Identity 'amasters' -Reset `
+  -NewPassword (ConvertTo-SecureString -AsPlainText "NewP@ssw0rdReset!" -Force)
+
+Set-ADUser -Identity amasters -ChangePasswordAtLogon $true
+```
+
+GUI method: found Adam in ADUC, right-clicked, hit **Reset Password**, entered a temp password, and checked both **Unlock the user's account** and **User must change password at next logon**, then OK.
+
+---
+
+## Task 2 — Manage Groups and OUs
+
+### Creating the OU and Security Group
+
+A new OU called **Security Analysts** needed to be created inside the IT hive, then a matching security group inside it.
+
+```powershell
+New-ADOrganizationalUnit -Name "Security Analysts" `
+  -Path "OU=IT,OU=HQ-NYC,OU=Employees,OU=CORP,DC=INLANEFREIGHT,DC=LOCAL"
+
+New-ADGroup -Name "Security Analysts" -SamAccountName analysts `
+  -GroupCategory Security -GroupScope Global `
+  -DisplayName "Security Analysts" `
+  -Path "OU=Security Analysts,OU=IT,OU=HQ-NYC,OU=Employees,OU=Corp,DC=INLANEFREIGHT,DC=LOCAL" `
+  -Description "Members of this group are Security Analysts under the IT OU"
+```
+
+For the GUI: right-clicked IT, chose **New > Organizational Unit**, named it `Security Analysts`, left the accidental deletion protection on, hit OK. Then right-clicked the new OU, chose **New > Group**, named it `Security Analysts`, set scope to **Domain local**, type to **Security**.
+
+### Adding Users to the Group
+
+```powershell
+Add-ADGroupMember -Identity analysts -Members ACepheus,OStarchaser,ACallisto
+```
+
+GUI method: right-clicked each user, chose **Add to a group**, typed `Security Analysts`, confirmed the name resolved (it underlines on a match), and hit OK.
+
+---
+
+## Task 3 — Manage Group Policy Objects
+
+### Duplicating and Linking the GPO
+
+The existing **Logon Banner** GPO was copied and renamed **Security Analysts Control**, then linked to the new OU:
+
+```powershell
+Copy-GPO -SourceName "Logon Banner" -TargetName "Security Analysts Control"
+
+New-GPLink -Name "Security Analysts Control" `
+  -Target "ou=Security Analysts,ou=IT,OU=HQ-NYC,OU=Employees,OU=Corp,dc=INLANEFREIGHT,dc=LOCAL" `
+  -LinkEnabled Yes
+```
+
+### Editing the GPO
+
+Opened GPMC from **Server Manager > Tools > Group Policy Management**, right-clicked **Security Analysts Control**, selected **Edit**.
+
+**User Configuration changes:**
+
+| Path | Setting | Value |
 |---|---|---|
-| **Type** | Authentication protocol | Offline credential attack |
-| **Purpose** | Securely authenticate users and grant access to network services without transmitting passwords | Extract and crack service account password hashes to gain plaintext credentials |
-| **Nature** | Legitimate, by-design network authentication mechanism | Exploitation of a legitimate Kerberos feature |
-| **Ticket Involved** | TGT (Ticket Granting Ticket) and TGS ticket | TGS ticket (service ticket) specifically |
+| `Administrative Templates > System > Removable Storage Access` | All Removable Storage classes: Deny all access | Enabled |
+| `Administrative Templates > System` | Prevent access to the command prompt | Disabled |
 
-**Why Kerberoasting is possible:**
+> Removable media is blocked for security. CMD/PowerShell is explicitly allowed since analysts need it for their daily work.
 
-Kerberoasting exploits a fundamental design feature of the Kerberos protocol: any authenticated domain user can request a TGS ticket for any SPN registered in Active Directory — no special privileges are required. Because the TGS ticket is encrypted using the password hash of the service account associated with the SPN, an attacker who requests this ticket receives a blob of ciphertext that is directly derived from the service account's password. The attacker can then take this encrypted ticket offline and subject it to brute-force or dictionary attacks (using tools like Hashcat) without ever generating any further network traffic or alerts. The attack is possible because the Kerberos protocol was designed for interoperability and availability, trusting that any authenticated domain user has a legitimate reason to request service tickets — it does not restrict which accounts can be targeted or rate-limit ticket requests.
+**Computer Configuration changes:**
 
----
+Verified the logon banner under `Local Policies > Security Options`:
+- **Interactive logon: Message text** — defined with warning text
+- **Interactive logon: Message title** — set to `Computer Access Policy`
 
-## Q3. Key Active Directory Terms Defined [0.5 marks]
+Password policy under `Account Policies > Password Policy`:
 
-**(a) LDAP — Lightweight Directory Access Protocol**
-LDAP is a standardised network protocol used to query and modify directory services, operating on **port 389** (plaintext) or port 636 (LDAPS/TLS). In an Active Directory environment, LDAP is the primary mechanism through which clients, tools, and services read directory objects — users, groups, computers, and SPNs. From an attacker's perspective, LDAP is invaluable during enumeration: tools such as `ldapsearch`, BloodHound, and PowerView use unauthenticated or low-privilege LDAP queries to map the entire domain structure, identify privileged accounts, find Kerberoastable SPNs, and discover misconfigured ACLs — all without triggering typical security alerts.
-
-**(b) SPN — Service Principal Name**
-An SPN is a unique identifier that associates a specific network service with the Active Directory account running that service (e.g., `MSSQLSvc/dbserver.corp.local:1433` mapped to the `svc_sql` account). SPNs have no dedicated port number — they are attributes stored within AD objects. In an attack context, SPNs are central to **Kerberoasting**: enumerating accounts with SPNs (via `GetUserSPNs.py` or PowerView) reveals service accounts whose password hashes can be requested as TGS tickets and cracked offline. Service accounts with SPNs often have weak, infrequently rotated passwords, making them high-value targets.
-
-**(c) Domain Controller (DC)**
-A Domain Controller is a Windows Server that hosts and manages the Active Directory database (NTDS.dit), handling authentication (Kerberos and NTLM), policy enforcement (Group Policy), and directory replication across the domain. It listens on multiple ports including 88 (Kerberos), 389 (LDAP), 445 (SMB), and 3268 (Global Catalog). In Active Directory attacks, the DC is the ultimate target: compromising it via techniques like DCSync, Golden Ticket forgery, or Pass-the-Ticket grants an attacker complete control over all domain identities. The DC also stores the KRBTGT hash, which is required to forge Golden Tickets.
-
-**(d) BloodHound / SharpHound**
-BloodHound is an open-source Active Directory attack path visualisation tool that ingests data collected by its companion collector, **SharpHound** (a C# executable, no dedicated port). SharpHound runs on a domain-joined host and uses LDAP queries and Windows API calls to gather information about users, groups, sessions, ACLs, and trust relationships. BloodHound then graphs this data and uses graph theory to automatically identify the shortest attack paths to Domain Admin. In an attack scenario, BloodHound reveals non-obvious privilege escalation routes — for example, showing that a low-privilege user has `GenericAll` over a group that contains a Domain Admin — which would be nearly impossible to discover manually in large environments.
+| Setting | Value |
+|---|---|
+| Minimum password length | 10 characters |
+| Password must meet complexity requirements | Enabled |
+| Enforce password history | 5 passwords |
+| Minimum password age | 7 days |
+| Maximum password age | 30 days (auto-set) |
 
 ---
 
-## Q4. Golden Ticket vs. Silver Ticket Comparison [0.5 marks]
+## Result
 
-| Aspect | Golden Ticket | Silver Ticket |
-|---|---|---|
-| **Scope** | Domain-wide — grants access to **any** service across the entire domain | Service-specific — grants access to **one specific service** on one host (e.g., CIFS on a single server) |
-| **Hash Required** | KRBTGT account's NTLM hash (obtained via DCSync or NTDS.dit dump) | Target **service account's** NTLM hash (e.g., the computer account or a service account hash) |
-| **KDC Contact** | None required after forging — the KDC is bypassed entirely for service access | None required — the ticket is presented directly to the target service, bypassing the KDC completely |
-| **Stealth Level** | Lower stealth — domain-wide access generates more activity; KRBTGT hash compromise is a critical indicator | Higher stealth — traffic stays between the client and the single target service; no KDC logs are generated |
+All three tasks completed. New hires are in AD with correct attributes, old accounts removed, and Adam's account is unlocked with a forced password reset. The Security Analysts OU and group exist with the right members. The GPO is linked to the OU, blocks removable media, allows CMD access, and enforces the updated password policy.
 
-**Why Silver Tickets are harder to detect:**
-
-A Silver Ticket is significantly harder to detect than a Golden Ticket because it is never validated by the KDC — it is presented directly to the target service, which decrypts it using its own local secret key and grants access without contacting the domain controller at all. This means no Kerberos event logs are generated on the DC (such as Event ID 4768 or 4769), and the forged ticket never appears in any centralised authentication log. A Golden Ticket, while also bypassing the KDC for individual service requests, typically requires broader domain traversal that can trigger anomalous Kerberos ticket-granting events; additionally, KRBTGT compromise is often detected through DCSync alerts or NTDS.dit access logs. Silver Ticket activity, by contrast, is confined to a single service's local event log, which is rarely monitored with the same rigour as domain controllers.
+# HTB Academy — AD Administration: Guided Lab Part II
 
 ---
 
-## Q5. ACL/ACE Misconfigurations in Active Directory [0.5 marks]
+## Overview
 
-**What is an ACL/ACE Misconfiguration?**
+This is the second part of the AD admin lab. The only task here is joining a new workstation to the domain and moving it into the correct OU so that the GPO we set up in Part I applies to it properly.
 
-In Active Directory, every object (user, group, GPO, OU) has an **Access Control List (ACL)** — a list of **Access Control Entries (ACEs)** that define which principals (users, groups, computers) have which permissions over that object. An ACL/ACE misconfiguration occurs when excessive or unintended permissions are granted to a principal that should not hold them — for example, granting a standard domain user `GenericAll` rights over a privileged group. These misconfigurations frequently arise from legacy administrative shortcuts, group nesting errors, or delegation gone wrong, and they create invisible privilege escalation paths that BloodHound readily identifies.
-
----
-
-**Permission 1 — GenericAll**
-
-**(a) What an attacker can do:**
-`GenericAll` is the most powerful permission in Active Directory — it grants full control over the target object. If an attacker-controlled account holds `GenericAll` over a **user object**, they can reset that user's password, modify their attributes, or add an SPN to Kerberoast them. If held over a **group object**, the attacker can add any user (including themselves) to that group. If held over a **computer object**, the attacker can perform Resource-Based Constrained Delegation (RBCD) abuse.
-
-**(b) Realistic privilege escalation scenario:**
-Suppose a compromised low-privilege user `jdoe` is found (via BloodHound) to have `GenericAll` over the `IT_Admins` group, which contains a Domain Admin. The attacker uses PowerView to add `jdoe` directly to `IT_Admins`:
-```
-Add-DomainGroupMember -Identity 'IT_Admins' -Members 'jdoe'
-```
-After re-authenticating, `jdoe` now inherits all privileges of the `IT_Admins` group, granting domain administrator access and completing a full privilege escalation from a standard user to Domain Admin without exploiting any software vulnerability.
-
----
-
-**Permission 2 — WriteDACL**
-
-**(a) What an attacker can do:**
-`WriteDACL` (Write Discretionary Access Control List) allows an attacker to **modify the ACL of the target object** — effectively rewriting the permissions on it. This means the attacker can grant themselves (or any other principal) any permission they choose, including `GenericAll`, `DCSync` rights (`DS-Replication-Get-Changes-All`), or full write access. It turns a limited foothold into arbitrary object control.
-
-**(b) Realistic privilege escalation scenario:**
-An attacker has compromised a service account `svc_monitor` and discovers via BloodHound that this account holds `WriteDACL` over the **domain object** itself. The attacker uses PowerView to grant `svc_monitor` DCSync replication rights:
-```
-Add-DomainObjectAcl -TargetIdentity "DC=corp,DC=local" -PrincipalIdentity svc_monitor -Rights DCSync
-```
-With DCSync rights, the attacker runs Mimikatz (`lsadump::dcsync /user:krbtgt`) to dump the KRBTGT hash and all domain account hashes, effectively achieving full domain compromise — all without ever logging into a domain controller.
-
----
-
-## Q6. Persistence Techniques After Domain Admin Access [0.5 marks]
-
-**Context:** Once an attacker achieves Domain Admin access, their primary goal shifts from escalation to maintaining that access — even if passwords are reset or incidents are partially remediated. Two powerful techniques for this are **Golden Ticket Persistence** and **DCSync Backdoor via AdminSDHolder**.
-
----
-
-**Technique 1 — Golden Ticket Persistence**
-
-**(a) How it works:**
-After dumping the KRBTGT account's NTLM hash (via Mimikatz `lsadump::dcsync`), an attacker can forge a Golden Ticket at any time — even months later — using that hash offline. The forged TGT contains a self-defined identity (e.g., a non-existent user with Domain Admin group membership) and is encrypted with the stolen KRBTGT key, making it indistinguishable from a legitimately issued ticket from the KDC's perspective.
-```
-kerberos::golden /user:FakeAdmin /domain:corp.local /sid:S-1-5-21-... /krbtgt:<hash> /ptt
+**Connection:**
+```bash
+xfreerdp /v:<TARGET_IP> /u:image /p:Academy_student_AD!
 ```
 
-**(b) Why it survives incident response:**
-Golden Ticket persistence survives password resets on all service and admin accounts because it is not tied to any user account's password — it is tied exclusively to the KRBTGT hash. Even if every domain user's password is reset during incident response, the Golden Ticket remains valid until the KRBTGT account's password is reset **twice** (to invalidate all outstanding tickets). Most incident responders reset user account passwords without performing the dual KRBTGT rotation, leaving the backdoor fully functional.
-
-**(c) How a defender removes it:**
-The KRBTGT account password must be reset **twice**, at least 10 hours apart (the default TGT lifetime), to invalidate all forged and legitimate tickets based on the old hash. Microsoft's `New-KrbtgtKeys.ps1` script automates this safely in production environments. Defenders should also monitor for Event ID 4769 with unusual encryption types (RC4 in modern environments) and anomalous TGT lifetimes via Microsoft Defender for Identity or a SIEM.
+> Note: This host (`ACADEMY-IAD-W10`) is **not** domain-joined yet. That's the whole point of the task.
 
 ---
 
-**Technique 2 — DCSync Backdoor via AdminSDHolder**
+## Task 4 — Add and Remove Computers to the Domain
 
-**(a) How it works:**
-**AdminSDHolder** is a special AD container object (`CN=AdminSDHolder,CN=System,DC=...`) whose ACL is used as a template to protect privileged group members. Every 60 minutes, a background process called **SDProp (Security Descriptor Propagator)** copies the AdminSDHolder's ACL onto all members of protected groups (Domain Admins, Enterprise Admins, etc.), overwriting any manual ACL changes made to those accounts. An attacker with Domain Admin access can add a malicious ACE — such as granting a low-privilege account `GenericAll` or DCSync rights — to the AdminSDHolder object itself. SDProp then automatically propagates this backdoor ACE to all protected accounts every hour, permanently.
+### Option A: Join via PowerShell (Remote)
 
-**(b) Why it survives incident response:**
-This technique is extremely resilient: if a defender manually removes the rogue ACE from a protected user object, SDProp will restore it automatically within 60 minutes. Even after the original Domain Admin session is terminated, the compromised low-privilege account retains its elevated permissions. Because AdminSDHolder is an obscure AD internal object, it is rarely checked during standard incident response, and the propagation occurs silently with no user-facing events.
+If you're running this from another machine on the network, you can push the join remotely. This uses the local account on the target machine to authenticate to it, then the domain admin account to authorize the join:
 
-**(c) How a defender removes it:**
-The malicious ACE must be removed from the **AdminSDHolder object itself** — not from individual protected accounts — using AD Users and Computers (enable Advanced Features → System → AdminSDHolder → Properties → Security) or PowerShell (`Get-Acl`/`Set-Acl`). After cleaning AdminSDHolder, SDProp will then push the corrected ACL to all protected accounts. Defenders should audit AdminSDHolder permissions regularly using BloodHound or `Get-DomainObjectAcl` and monitor Event ID 4662 for unexpected replication-related permission grants.
+```powershell
+Add-Computer -ComputerName ACADEMY-IAD-W10 `
+  -LocalCredential ACADEMY-IAD-W10\image `
+  -DomainName INLANEFREIGHT.LOCAL `
+  -Credential INLANEFREIGHT\htb-student_adm `
+  -Restart
+```
+
+### Option B: Join via PowerShell (Local — on the target machine itself)
+
+If you're already logged into `ACADEMY-IAD-W10`, the command is simpler:
+
+```powershell
+Add-Computer -DomainName INLANEFREIGHT.LOCAL `
+  -Credential INLANEFREIGHT\HTB-student_adm `
+  -Restart
+```
+
+The `-Restart` flag is required. The domain join doesn't fully apply until the machine reboots and picks up domain policies.
+
+### Option C: Join via GUI
+
+1. Open **Control Panel > System and Security > System**, click **Change settings** in the Computer name section
+2. In the System Properties window, click **Change** next to "rename this computer or change its domain"
+3. Under **Member of**, select **Domain** and type `INLANEFREIGHT.LOCAL`, then hit OK
+4. When prompted, enter the domain admin credentials: `INLANEFREIGHT\htb-student_adm` / `Academy_student_DA!`
+5. If successful, a popup says **Welcome to the INLANEFREIGHT.LOCAL domain**
+6. Restart the machine to apply the changes
 
 ---
+
+## Moving the Computer to the Correct OU
+
+When a computer joins a domain without a pre-staged AD object, it lands in the default **Computers** container — not the OU we want. We need to move `ACADEMY-IAD-W10` into the **Security Analysts** OU so the GPO from Task 3 takes effect.
+
+### Verify current location first
+
+```powershell
+Get-ADComputer -Identity "ACADEMY-IAD-W10" -Properties * | select CN,CanonicalName,IPv4Address
+```
+
+The `CanonicalName` field shows the full path like `INLANEFREIGHT.LOCAL/Computers/ACADEMY-IAD-W10`, confirming it's in the wrong place.
+
+### Move via ADUC (GUI)
+
+1. Open **Active Directory Users and Computers**
+2. Navigate to the **Computers** container under `INLANEFREIGHT.LOCAL`
+3. Right-click `ACADEMY-IAD-W10` and select **Move**
+4. In the popup, drill down to `Corp > Employees > HQ-NYC > IT > Security Analysts`
+5. Select the **Security Analysts** OU and hit OK
+
+### Move via PowerShell
+
+```powershell
+Get-ADComputer -Identity "ACADEMY-IAD-W10" | `
+  Move-ADObject -TargetPath "OU=Security Analysts,OU=IT,OU=HQ-NYC,OU=Employees,OU=Corp,DC=INLANEFREIGHT,DC=LOCAL"
+```
+
+After moving, verify by checking the OU contents in ADUC or running:
+
+```powershell
+Get-ADComputer -Identity "ACADEMY-IAD-W10" -Properties CanonicalName | select CanonicalName
+```
+
+The output should now show the Security Analysts OU path.
+
+---
+
+## Result
+
+`ACADEMY-IAD-W10` is now joined to `INLANEFREIGHT.LOCAL` and sitting in the **Security Analysts** OU. The GPO linked in Part I (**Security Analysts Control**) will apply to it on next Group Policy refresh, enforcing the logon banner, removable media block, and password policy we configured earlier.
